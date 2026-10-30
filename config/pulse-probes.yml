@@ -1,0 +1,196 @@
+# =============================================================================
+# enu-external-api-pulse - probe configuration
+#
+# Adding a new docId for an existing state  -> add an entry under that source's docs.
+# Adding a new state                        -> add a new entry under sources.
+# Neither needs a code change; restart the service to pick it up.
+#
+# Placeholders (work in url, headers, query values, body, auth values):
+#   {{env.NAME}}     value of environment variable / property NAME (use for every secret)
+#   {{auth.NAME}}    value extracted by the source's token-call auth profile
+#   {{uuid}}         random UUID, e.g. for a unique transaction id
+#   {{now.epochMillis}} / {{now.epochSeconds}} / {{now.iso}}
+#
+# Inheritance: docId setting -> source setting -> global setting -> built-in default.
+# The service refuses to start if anything here is inconsistent and lists every problem.
+# =============================================================================
+pulse:
+  enabled: true
+
+  # ---------------------------------------------------------------- timing
+  defaults:
+    connectTimeoutMs: 5000   # global only
+    timeoutMs: 10000         # whole request, per attempt
+    intervalSec: 300         # how often each API is checked
+    retries: 2               # extra attempts before a check counts as failed
+    retryBackoffMs: 2000     # wait 2s, then 4s, ...
+
+  # ---------------------------------------------------------------- anti-spam
+  alerting:
+    failureThreshold: 3        # failed checks in a row before DOWN is declared
+    recoveryThreshold: 2       # passed checks in a row before it counts as recovered
+    reminderIntervalMin: 60    # while still down, email again at most this often
+    reminderBackoff: 2.0       # 60 -> 120 -> 240 min ... (1.0 = fixed interval)
+    maxReminderIntervalMin: 480
+    maxReminders: 0            # 0 = keep reminding until it recovers
+    sendRecoveryEmail: true
+
+  mail:
+    enabled: false             # false = alerts are only logged; set true once SMTP works
+    from: enu-pulse@ourco.com
+    subjectPrefix: "[ENU-PULSE]"
+    zone: Asia/Kolkata
+
+  # ---------------------------------------------------------------- network
+  proxies:
+    corp-proxy:
+      host: proxy.ourco.internal
+      port: 8080
+      username: "{{env.PROXY_USER}}"
+      password: "{{env.PROXY_PASSWORD}}"
+
+  # Reference URLs that are always up, called through the same route as the probes.
+  # Key = proxy name, or "none" for direct. If they fail too, the problem is ours, not the vendor's.
+  control-checks:
+    corp-proxy:
+      urls: [ "https://www.google.com", "https://www.microsoft.com" ]
+      intervalSec: 60
+      cacheSec: 30
+      timeoutMs: 5000
+
+  # ---------------------------------------------------------------- auth
+  auth-profiles:
+    # Static key in a header
+    mh-key:
+      type: apiKey
+      header: X-API-KEY
+      value: "{{env.MH_API_KEY}}"
+
+    # Login call with its own body; token goes into a header of the main call
+    tn-login:
+      type: token-call
+      request:
+        url: https://api.tn.example.gov.in/oauth/token
+        method: POST
+        headers:
+          Content-Type: application/json
+        body: '{"clientId":"{{env.TN_CLIENT_ID}}","clientSecret":"{{env.TN_CLIENT_SECRET}}"}'
+      expect:
+        status: 200
+      extract:
+        token: "$.access_token"
+        expiresIn: "$.expires_in"       # optional: seconds until the token expires
+      cacheTtlSec: 3000                 # used when expiresIn is not returned
+      apply:
+        headers:
+          Authorization: "Bearer {{auth.token}}"
+
+    # Login call (form body); session id goes into the BODY of the main call instead
+    ka-session:
+      type: token-call
+      request:
+        url: https://api.ka.example.gov.in/login
+        method: POST
+        headers:
+          Content-Type: application/x-www-form-urlencoded
+        body: "user={{env.KA_USER}}&pwd={{env.KA_PASSWORD}}"
+      expect:
+        status: 200
+        jsonPath: "$.status"
+        equals: "SUCCESS"
+      extract:
+        sessionId: "$.data.sessionId"
+      cacheTtlSec: 900
+      alwaysRefresh: false              # true = log in on every check (also monitors the login API itself)
+
+  # ---------------------------------------------------------------- who gets told
+  recipient-groups:
+    infra-team: [ infra@ourco.com, network@ourco.com ]
+    app-team:   [ enu-dev@ourco.com ]
+
+  # Every category must be listed. apiContacts: true also emails the API's own contacts.
+  # channels: [email] today; add "jira" once the Jira channel exists.
+  routing:
+    DNS:                 { groups: [ infra-team ], apiContacts: false, channels: [ email ] }
+    PROXY:               { groups: [ infra-team ], apiContacts: false, channels: [ email ] }
+    NETWORK:             { groups: [ infra-team, app-team ], apiContacts: false, channels: [ email ] }
+    CONFIG_ERROR:        { groups: [ app-team ],   apiContacts: false, channels: [ email ] }
+    TLS:                 { groups: [ app-team ],   apiContacts: true,  channels: [ email ] }
+    AUTH:                { groups: [ app-team ],   apiContacts: false, channels: [ email ] }
+    AUTH_REJECTED:       { groups: [ app-team ],   apiContacts: false, channels: [ email ] }
+    AUTH_ENDPOINT_DOWN:  { groups: [ app-team ],   apiContacts: true,  channels: [ email ] }
+    AUTH_EXTRACT_FAILED: { groups: [ app-team ],   apiContacts: true,  channels: [ email ] }
+    VENDOR_DOWN:         { groups: [ app-team ],   apiContacts: true,  channels: [ email ] }
+    RATE_LIMITED:        { groups: [ app-team ],   apiContacts: false, channels: [ email ] }
+    SLOW_RESPONSE:       { groups: [ app-team ],   apiContacts: true,  channels: [ email ] }
+    CONTRACT:            { groups: [ app-team ],   apiContacts: true,  channels: [ email ] }
+
+  # ---------------------------------------------------------------- the APIs
+  sources:
+    - source: MAHARASHTRA
+      baseUrl: https://api.mh.example.gov.in
+      auth: mh-key
+      proxy: corp-proxy
+      contacts: [ support@mh.example.gov.in ]
+      headers:
+        Accept: application/json
+      docs:
+        - docId: DL
+          contacts: [ dl-owner@mh.example.gov.in ]      # replaces the source contacts for this docId
+          request:
+            path: /v1/dl/verify
+            method: POST
+            headers:
+              Content-Type: application/json
+            body: '{"docId":"DL","refNo":"TEST123","txnId":"{{uuid}}"}'
+          expect:
+            status: [ 200, 404 ]                        # a dummy refNo may legitimately be "not found"
+            maxLatencyMs: 8000
+        - docId: RC
+          intervalSec: 600
+          request:
+            path: /v1/rc/verify
+            method: GET
+            query:
+              refNo: TEST123
+
+    - source: TAMIL_NADU
+      baseUrl: https://api.tn.example.gov.in
+      auth: tn-login
+      proxy: corp-proxy
+      contacts: [ api-support@tn.example.gov.in ]
+      docs:
+        - docId: BIRTH_CERT
+          request:
+            path: /v2/birth/verify
+            method: POST
+            headers:
+              Content-Type: application/json
+            body: '{"certNo":"TEST-0001"}'
+          expect:
+            status: 200
+            jsonPath: "$.responseCode"
+            equals: "00"
+
+    - source: KARNATAKA
+      baseUrl: https://api.ka.example.gov.in
+      auth: ka-session
+      proxy: corp-proxy
+      contacts: [ helpdesk@ka.example.gov.in ]
+      alerting:
+        reminderIntervalMin: 120        # this state prefers fewer reminders
+      docs:
+        - docId: RC
+          request:
+            path: /v1/rc/verify
+            method: POST
+            headers:
+              Content-Type: application/json
+            body: '{"refNo":"TEST123","session":"{{auth.sessionId}}"}'
+        - docId: CASTE
+          auth: none                    # this API needs no auth at all
+          request:
+            path: /v1/caste/verify
+            method: GET
+            query:
+              certNo: TEST123

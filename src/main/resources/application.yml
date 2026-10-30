@@ -1,0 +1,38 @@
+spring:
+  application:
+    name: enu-external-api-pulse
+  threads:
+    virtual:
+      enabled: true
+  # Probe definitions live outside the jar, so adding an API is a config change + restart, not a build.
+  # Point PULSE_CONFIG elsewhere if needed (e.g. a mounted ConfigMap or a file pulled from S3).
+  config:
+    import: "optional:file:${PULSE_CONFIG:./config/pulse-probes.yml}"
+
+  # SMTP relay. Set pulse.mail.enabled=true once this works; until then alerts are only logged.
+  mail:
+    host: ${SMTP_HOST:localhost}
+    port: ${SMTP_PORT:25}
+    username: ${SMTP_USERNAME:}
+    password: ${SMTP_PASSWORD:}
+    properties:
+      mail.smtp.auth: ${SMTP_AUTH:false}
+      mail.smtp.starttls.enable: ${SMTP_STARTTLS:false}
+      mail.smtp.connectiontimeout: 5000
+      mail.smtp.timeout: 10000
+
+server:
+  port: ${PORT:8085}
+
+management:
+  health:
+    mail:
+      enabled: false   # an SMTP hiccup should not mark this service itself as down
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+logging:
+  level:
+    com.uidai.enu.extapipulse: INFO
